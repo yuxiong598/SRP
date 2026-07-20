@@ -14,6 +14,7 @@ import face_module
 import ocr_module
 import time_module
 import weight_module
+import auto_outbound
 
 
 app = Flask(__name__)
@@ -567,6 +568,76 @@ def save_usage_record():
 def list_records():
     limit = int(request.args.get("limit", 100))
     return jsonify(db.get_all_measurements(limit=limit))
+
+
+@app.route("/api/auto/outbound", methods=["POST"])
+@require_auth()
+def auto_outbound():
+    """
+    自动领用流程接口
+    从串口读取卡片、摄像头拍照、OCR识别、读取重量
+    返回所有领用信息供前端确认
+    """
+    data = request.get_json(silent=True) or {}
+    try:
+        result = auto_outbound.auto_outbound_workflow(
+            card_port=data.get("card_port", "COM3"),
+            weight_port=data.get("weight_port", "COM4"),
+            camera_id=int(data.get("camera_id", 0)),
+            card_baudrate=int(data.get("card_baudrate", 9600)),
+            weight_baudrate=int(data.get("weight_baudrate", 9600)),
+            timeout=float(data.get("timeout", 10))
+        )
+
+        # 记录日志
+        if result.get("success"):
+            db.log_action(
+                "auto_outbound.scan",
+                _actor(),
+                "card",
+                result.get("card_no"),
+                json.dumps(result, ensure_ascii=False)
+            )
+
+        return jsonify(result)
+    except Exception as exc:
+        return json_error(str(exc), 500)
+
+
+@app.route("/api/auto/outbound/confirm", methods=["POST"])
+@require_auth()
+def auto_outbound_confirm():
+    """
+    确认自动领用并写入数据库
+    """
+    data = request.get_json(silent=True) or {}
+    auto_result = data.get("auto_result")
+
+    if not auto_result:
+        return json_error("auto_result is required")
+
+    try:
+        tx = auto_outbound.confirm_auto_outbound(
+            user_id=_actor()["id"],
+            auto_result=auto_result,
+            quantity=data.get("quantity"),
+            purpose=data.get("purpose", ""),
+            project_name=data.get("project_name", "")
+        )
+
+        db.log_action(
+            "auto_outbound.confirm",
+            _actor(),
+            "transaction",
+            tx["id"],
+            tx["transaction_no"]
+        )
+
+        return jsonify({"success": True, "transaction": tx})
+    except ValueError as exc:
+        return json_error(str(exc))
+    except Exception as exc:
+        return json_error(str(exc), 500)
 
 
 if __name__ == "__main__":
